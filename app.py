@@ -1,9 +1,17 @@
 import streamlit as st
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 import re
-from transformers import pipeline
 import time
 from typing import List, Optional, Dict, Any
+
+# Optional imports for summarization
+SUMMARIZATION_AVAILABLE = False
+try:
+    from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+    SUMMARIZATION_AVAILABLE = True
+except ImportError:
+    st.warning("⚠️ Summarization features are disabled because required packages are not installed.")
+    st.warning("To enable summarization, install the required packages with: `pip install transformers torch sentencepiece`")
 
 # ============ Utility Functions ============
 
@@ -99,9 +107,33 @@ def chunk_text(text: str, max_len: int = 1800) -> List[str]:
         
     return chunks
 
-@st.cache_resource
-def load_summarizer():
-    return pipeline("summarization", model="MBZUAI/LaMini-Flan-T5-248M")
+def summarize_text(text: str, model_name: str = "facebook/bart-large-cnn") -> Optional[str]:
+    """Summarize the given text using a pre-trained model if available."""
+    if not SUMMARIZATION_AVAILABLE:
+        return None
+        
+    try:
+        # Load the model and tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        
+        # Initialize the summarization pipeline
+        summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
+        
+        # Split the text into chunks that fit within the model's maximum length
+        max_chunk_length = 1024  # Adjust based on the model's max length
+        chunks = [text[i:i + max_chunk_length] for i in range(0, len(text), max_chunk_length)]
+        
+        # Generate summary for each chunk and combine
+        summaries = []
+        for chunk in chunks:
+            summary = summarizer(chunk, max_length=150, min_length=30, do_sample=False)
+            summaries.append(summary[0]['summary_text'])
+        
+        return " ".join(summaries)
+    except Exception as e:
+        st.warning(f"⚠️ Summarization failed: {str(e)}")
+        return None
 
 # =========== Streamlit UI ===========
 
@@ -150,6 +182,14 @@ with st.sidebar:
     2. Toggle summarization if desired
     3. View the transcript and summary
     """)
+    
+    st.header("Settings")
+    enable_summary = st.checkbox(
+        "Enable AI Summary", 
+        value=SUMMARIZATION_AVAILABLE, 
+        disabled=not SUMMARIZATION_AVAILABLE,
+        help="AI-powered summarization is not available. Install required packages to enable." if not SUMMARIZATION_AVAILABLE else "Enable AI-powered summarization (requires more resources)"
+    )
 
 # Main content
 st.title("🎬 YouTube Video Transcript Summarizer")
@@ -162,9 +202,7 @@ with st.form("youtube_form"):
         youtube_url = st.text_input("YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
     with col2:
         st.markdown("##")  # For vertical alignment
-        summarize = st.checkbox("Generate AI Summary", value=True, help="Enable to generate an AI-powered summary")
-    
-    submitted = st.form_submit_button("Process Video")
+        submitted = st.form_submit_button("Process Video")
 
 if submitted and youtube_url:
     progress_bar = st.progress(0)
@@ -209,78 +247,42 @@ if submitted and youtube_url:
             )
             
             # Summarize if requested
-            if summarize and transcript_text.strip():
-                status_text.text("🧠 Processing transcript with AI...")
-                progress_bar.progress(60)
+            if enable_summary and SUMMARIZATION_AVAILABLE:
+                with st.spinner("Generating summary (this may take a minute)..."):
+                    summary = summarize_text(transcript_text)
+                    if summary:
+                        st.session_state.summary = summary
+                        st.success("Summary generated successfully!")
+                    else:
+                        st.error("Failed to generate summary. The transcript may be too short or there was an error with the summarization model.")
+                        st.session_state.summary = None
+            elif enable_summary and not SUMMARIZATION_AVAILABLE:
+                st.warning("Summarization is not available. Please install the required packages to enable this feature.")
+                st.code("pip install transformers torch sentencepiece")
+            
+            if 'summary' in st.session_state:
+                st.markdown("---")
+                st.subheader("📝 AI-Generated Summary")
+                with st.container():
+                    st.markdown(f"""
+                    <div style="
+                        background-color: #233863;
+                        padding: 1.5rem;
+                        border-radius: 0.5rem;
+                        margin: 1rem 0;
+                    ">
+                        {st.session_state.summary}
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                cleaned = clean_transcript(transcript_text)
-                if not cleaned:
-                    st.warning("The transcript is empty after cleaning. Cannot generate summary.")
-                else:
-                    prompt_prefix = (
-                        "Please provide a concise summary of the following text, "
-                        "focusing on the main points and key information. "
-                        "Keep it well-structured and easy to read.\n\n"
-                    )
-                    
-                    summarizer = load_summarizer()
-                    chunks = chunk_text(cleaned, max_len=1500)
-                    
-                    with st.spinner(f"Generating summary (processing {len(chunks)} chunks)..."):
-                        summaries = []
-                        for i, chunk in enumerate(chunks, 1):
-                            status_text.text(f"📝 Processing chunk {i} of {len(chunks)}...")
-                            progress = 60 + int(30 * (i / len(chunks)))
-                            progress_bar.progress(progress)
-                            
-                            summary = summarizer(
-                                prompt_prefix + chunk,
-                                max_length=250,
-                                min_length=50,
-                                do_sample=False,
-                                temperature=0.7,
-                                repetition_penalty=1.2,
-                                top_p=0.95
-                            )[0]['summary_text']
-                            summaries.append(summary)
-                        
-                        # If multiple chunks, merge summaries
-                        if len(summaries) > 1:
-                            status_text.text("🔗 Combining summaries...")
-                            progress_bar.progress(95)
-                            combined_summary = " ".join(summaries)
-                            final_summary = summarizer(
-                                prompt_prefix + combined_summary,
-                                max_length=300,
-                                min_length=100,
-                                do_sample=False
-                            )[0]['summary_text']
-                        else:
-                            final_summary = summaries[0]
-                        
-                        # Display final summary
-                        st.markdown("---")
-                        st.subheader("📝 AI-Generated Summary")
-                        with st.container():
-                            st.markdown(f"""
-                            <div style="
-                                background-color: #233863;
-                                padding: 1.5rem;
-                                border-radius: 0.5rem;
-                                margin: 1rem 0;
-                            ">
-                                {final_summary}
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        # Add download button for summary
-                        st.download_button(
-                            label="Download Summary",
-                            data=final_summary,
-                            file_name=f"summary_{video_id}.txt",
-                            mime="text/plain"
-                        )
-        
+                # Add download button for summary
+                st.download_button(
+                    label="Download Summary",
+                    data=st.session_state.summary,
+                    file_name=f"summary_{video_id}.txt",
+                    mime="text/plain"
+                )
+                
         except NoTranscriptFound:
             st.error("❌ No English transcript available for this video.")
         except TranscriptsDisabled:

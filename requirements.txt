@@ -1,7 +1,9 @@
 streamlit>=1.32.0
 youtube-transcript-api>=0.6.1
-transformers>=4.30.0
-torch>=2.0.0
-tqdm>=4.65.0
-sentencepiece>=0.1.99
-protobuf>=3.20.0
+
+# Optional dependencies for AI summarization
+# Uncomment these lines if you want to enable AI summarization
+# transformers>=4.30.0
+# torch>=2.0.0
+# sentencepiece>=0.1.99
+# protobuf>=3.20.0
